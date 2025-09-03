@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 pragma solidity ^0.8.24;
 
-// This contract implements a privacy‑preserving anonymous messaging service
+// This contract implements a privacy preserving anonymous messaging service
 // using Zama's FHEVM library.  Users can create an "inbox" (simply by
 // providing their address) and share a link so anyone can send them an
 // encrypted message.  Messages are stored on‑chain as encrypted 64‑bit
 // identifiers that reference off‑chain message bodies.  The contract uses
 // Fully Homomorphic Encryption (FHE) operations to sanitize inputs and
-// manage permissions via the access‑control list (ACL) functions.  After
+// manage permissions via the access‟control list (ACL) functions.  After
 // decrypting a message off‑chain, the recipient can send an encrypted reply
 // back to the original sender without ever learning the sender’s identity.
 
@@ -16,7 +16,7 @@ import {SepoliaConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
 
 /**
  * @title AnonymousMessages
- * @notice Privacy‑preserving message board with encrypted messages and replies.
+ * @notice Privacy‟preserving message board with encrypted messages and replies.
  *
  * Each message consists of an encrypted 64‑bit identifier pointing to the
  * message body stored off‑chain.  The sender’s address is recorded but
@@ -80,6 +80,10 @@ contract AnonymousMessages is SepoliaConfig {
         // decrypt this ciphertext off‑chain【664752838332074†L125-L158】.
         FHE.allow(msgId, recipient);
         FHE.allow(msgId, msg.sender);
+        // Also allow the contract itself to decrypt this ciphertext.  Without this
+        // authorization, the Hardhat FHEVM plugin cannot decrypt the handle
+        // when simulating on‑chain calls in tests.
+        FHE.allowThis(msgId);
 
         // Store the message and update the inbox index
         uint256 index = messages.length;
@@ -125,6 +129,9 @@ contract AnonymousMessages is SepoliaConfig {
         // decrypt and view the reply off‑chain)【664752838332074†L125-L158】.
         FHE.allow(replyId, m.sender);
         FHE.allow(replyId, msg.sender);
+        // Also allow the contract itself to decrypt this reply ciphertext.  This
+        // mirrors the behavior in sendMessage() and fixes test failures.
+        FHE.allowThis(replyId);
 
         m.replyEncrypted = replyId;
         m.replied = true;
@@ -137,6 +144,19 @@ contract AnonymousMessages is SepoliaConfig {
      */
     function getInboxCount(address recipient) external view returns (uint256) {
         return inbox[recipient].length;
+    }
+
+    /**
+     * @notice Retrieve the global message index for a given recipient inbox position.
+     * @dev This helper exposes the private `inbox` mapping so the front end can
+     *      iterate through a user’s inbox without revealing sender identities.
+     * @param recipient Address of the inbox owner.
+     * @param pos Position within the recipient’s inbox (0‑based).
+     * @return msgIndex Index into the global `messages` array corresponding to this entry.
+     */
+    function getInboxMessageIndex(address recipient, uint256 pos) external view returns (uint256 msgIndex) {
+        require(pos < inbox[recipient].length, "pos out of bounds");
+        return inbox[recipient][pos];
     }
 
     /**
