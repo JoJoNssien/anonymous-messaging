@@ -56,13 +56,17 @@
       width: 120px;
     }
   </style>
-  <!-- Load ethers.js (UMD build attaches `ethers` to window) -->
-  <script src="https://cdn.jsdelivr.net/npm/ethers@6/dist/ethers.umd.min.js"></script>
-  <!-- Use ESM version of the Zama relayer SDK -->
-  <script type="module">
-    import { initSDK, createInstance, SepoliaConfig } from "https://cdn.zama.ai/relayer-sdk-js/0.1.0-9/relayer-sdk-js.js";
 
-    // Contract ABI with only the methods required by the front end
+  <!-- Ethers v6 UMD build (global `ethers`) -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6/dist/ethers.umd.min.js"></script>
+  <!-- Zama relayer SDK UMD build (global `relayerSDK`) -->
+  <script src="https://cdn.zama.ai/relayer-sdk-js/0.1.0-9/relayer-sdk-js.umd.cjs"></script>
+
+  <script>
+    // Destructure from the global relayerSDK UMD
+    const { initSDK, createInstance, SepoliaConfig } = window.relayerSDK || {};
+
+    // ABI with only the functions needed
     const contractAbi = [
       "function sendMessage(address recipient, uint256 encryptedMsg, bytes inputProof)",
       "function sendReply(uint256 msgIndex, uint256 encryptedReply, bytes inputProof)",
@@ -79,83 +83,110 @@
     let userAddress = null;
     let contract = null;
 
-    // Helper to update share link once contract address and user address are available
     function updateShareLink() {
-      const contractAddr = document.getElementById('contractAddress').value.trim();
+      const addr = document.getElementById('contractAddress').value.trim();
       const linkEl = document.getElementById('shareLink');
-      if (contractAddr && userAddress) {
-        linkEl.value = `${window.location.origin}${window.location.pathname}?contract=${contractAddr}&recipient=${userAddress}`;
+      if (addr && userAddress) {
+        linkEl.value = `${window.location.origin}${window.location.pathname}?contract=${addr}&recipient=${userAddress}`;
       } else {
         linkEl.value = '';
       }
     }
 
+    async function ensureSepolia() {
+      if (!window.ethereum) return;
+      const need = "0xaa36a7"; // Sepolia (lowercase)
+      const current = (await window.ethereum.request({ method: "eth_chainId" }))?.toLowerCase?.();
+      if (current === need) return;
+      try {
+        await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: need }] });
+      } catch (e) {
+        if (e.code === 4902) {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: need,
+              chainName: "Sepolia",
+              nativeCurrency: { name: "SepoliaETH", symbol: "ETH", decimals: 18 },
+              rpcUrls: ["https://rpc.sepolia.org"],
+              blockExplorerUrls: ["https://sepolia.etherscan.io"]
+            }]
+          });
+        } else {
+          throw e;
+        }
+      }
+    }
+
     async function connectWallet() {
       if (!window.ethereum) {
-        alert('MetaMask is required to use this dApp. Please install MetaMask and try again.');
+        alert('MetaMask is required. Please install it and try again.');
         return;
       }
       try {
         const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
         userAddress = accounts[0];
-        document.getElementById('userAddress').textContent = userAddress;
-        provider = new ethers.providers.Web3Provider(window.ethereum);
-        signer = provider.getSigner();
+        document.getElementById('userAddress').textContent = userAddress || 'Not connected';
 
-        // Initialize relayer SDK once on first connect
+        provider = new ethers.BrowserProvider(window.ethereum);
+        signer = await provider.getSigner();
+
+        await ensureSepolia();
+
         if (!relayerInstance) {
+          if (!window.relayerSDK) throw new Error('Relayer SDK failed to load (check script tag).');
           await initSDK();
-          // Provide network provider so the SDK can call the host chain
           const config = { ...SepoliaConfig, network: window.ethereum };
           relayerInstance = await createInstance(config);
         }
 
-        // Initialize contract if address is provided
-        const contractAddr = document.getElementById('contractAddress').value.trim();
-        if (contractAddr) {
-          contract = new ethers.Contract(contractAddr, contractAbi, signer);
+        const addr = document.getElementById('contractAddress').value.trim();
+        if (addr) {
+          contract = new ethers.Contract(addr, contractAbi, signer);
         }
+
         updateShareLink();
+
+        // Handle account/chain changes
+        window.ethereum.removeAllListeners?.('accountsChanged');
+        window.ethereum.on('accountsChanged', (accs) => {
+          userAddress = accs?.[0] || null;
+          document.getElementById('userAddress').textContent = userAddress || 'Not connected';
+          updateShareLink();
+        });
+        window.ethereum.removeAllListeners?.('chainChanged');
+        window.ethereum.on('chainChanged', () => window.location.reload());
       } catch (err) {
         console.error(err);
-        alert('Could not connect wallet.');
+        alert('Could not connect wallet: ' + (err?.message || err));
       }
     }
 
     async function initContractIfNeeded() {
-      const contractAddr = document.getElementById('contractAddress').value.trim();
-      if (!contract && contractAddr && signer) {
-        contract = new ethers.Contract(contractAddr, contractAbi, signer);
+      const addr = document.getElementById('contractAddress').value.trim();
+      if (!contract && addr && signer) {
+        contract = new ethers.Contract(addr, contractAbi, signer);
       }
     }
 
     async function sendMessage() {
-      if (!relayerInstance || !signer) {
-        alert('Please connect your wallet first.');
-        return;
-      }
+      if (!relayerInstance || !signer) { alert('Please connect your wallet first.'); return; }
       await initContractIfNeeded();
-      if (!contract) {
-        alert('Please enter a contract address.');
-        return;
-      }
+      if (!contract) { alert('Please enter a contract address.'); return; }
+
       const recipient = document.getElementById('msgRecipient').value.trim();
       const msgIdStr = document.getElementById('msgId').value.trim();
-      if (!recipient || !msgIdStr) {
-        alert('Please provide both recipient address and message ID.');
-        return;
-      }
+      if (!recipient || !msgIdStr) { alert('Provide both recipient address and message ID.'); return; }
+
       const msgId = BigInt(msgIdStr);
       try {
         const encInput = await relayerInstance.createEncryptedInput(contract.address, userAddress);
-        // encrypt the 64‑bit message ID; convert to BigInt
         encInput.add64(msgId);
         const encrypted = await encInput.encrypt();
         const tx = await contract.sendMessage(recipient, encrypted.handles[0], encrypted.inputProof);
         document.getElementById('status').textContent = 'Sending message...';
         await tx.wait();
-        document.getElementById('status').textContent = 'Message sent successfully!';
-        // Clear inputs
+        document.getElementById('status').textContent = 'Message sent!';
         document.getElementById('msgId').value = '';
         loadInbox();
       } catch (err) {
@@ -165,13 +196,10 @@
     }
 
     async function loadInbox() {
-      if (!relayerInstance || !signer) {
-        return;
-      }
+      if (!relayerInstance || !signer) return;
       await initContractIfNeeded();
-      if (!contract) {
-        return;
-      }
+      if (!contract) return;
+
       const inboxDiv = document.getElementById('inbox');
       inboxDiv.innerHTML = '';
       try {
@@ -189,16 +217,12 @@
             <button id="reply-btn-${msgIndex}">Send Reply</button>
           `;
           inboxDiv.appendChild(messageEl);
-          // Attach handlers
           document.getElementById(`decrypt-btn-${msgIndex}`).addEventListener('click', async () => {
             await decryptMessage(msgIndex);
           });
           document.getElementById(`reply-btn-${msgIndex}`).addEventListener('click', async () => {
             const replyIdStr = document.getElementById(`reply-id-${msgIndex}`).value.trim();
-            if (!replyIdStr) {
-              alert('Please enter a reply ID.');
-              return;
-            }
+            if (!replyIdStr) { alert('Enter a reply ID.'); return; }
             await sendReply(msgIndex, BigInt(replyIdStr));
           });
         }
@@ -213,11 +237,10 @@
       const cipher = await contract.getMessageCipher(msgIndex);
       try {
         const clearIds = await relayerInstance.userDecrypt([cipher]);
-        const clearId = clearIds[0];
-        document.getElementById(`decrypted-${msgIndex}`).textContent = `Message ID: ${clearId}`;
+        document.getElementById(`decrypted-${msgIndex}`).textContent = `Message ID: ${clearIds[0]}`;
       } catch (err) {
         console.error(err);
-        document.getElementById(`decrypted-${msgIndex}`).textContent = 'Decryption failed or not authorized.';
+        document.getElementById(`decrypted-${msgIndex}`).textContent = 'Decryption failed.';
       }
     }
 
@@ -238,28 +261,29 @@
       }
     }
 
-    // On load, prefill contract and recipient from query params
-    window.addEventListener('DOMContentLoaded', async () => {
+    // Populate fields from URL query parameters
+    window.addEventListener('DOMContentLoaded', () => {
       const params = new URLSearchParams(window.location.search);
       const contractParam = params.get('contract');
       const recipientParam = params.get('recipient');
-      if (contractParam) {
-        document.getElementById('contractAddress').value = contractParam;
-      }
-      if (recipientParam) {
-        document.getElementById('msgRecipient').value = recipientParam;
-      }
+      if (contractParam) document.getElementById('contractAddress').value = contractParam;
+      if (recipientParam) document.getElementById('msgRecipient').value = recipientParam;
     });
+
+    window.connectWallet = connectWallet;
+    window.sendMessage = sendMessage;
+    window.loadInbox   = loadInbox;
   </script>
 </head>
 <body>
   <h1>Zama Anonymous Messaging</h1>
+
   <div class="section">
     <h2>1. Connect Wallet & Set Contract</h2>
     <label>Contract Address
       <input type="text" id="contractAddress" placeholder="0x..." />
     </label>
-    <button id="connectBtn" onclick="connectWallet()">Connect Wallet</button>
+    <button onclick="connectWallet()">Connect Wallet</button>
     <p>Your address: <span id="userAddress">Not connected</span></p>
     <label>Shareable Link
       <input type="text" id="shareLink" readonly />
@@ -288,3 +312,4 @@
   </div>
 </body>
 </html>
+feat(frontend): switch to UMD ethers + Zama relayer SDK, fix MetaMask connect
