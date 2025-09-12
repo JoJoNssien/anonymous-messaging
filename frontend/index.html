@@ -169,31 +169,51 @@
       }
     }
 
-    async function sendMessage() {
+    <script>
+  async function sendMessage() {
+    try {
       if (!relayerInstance || !signer) { alert('Please connect your wallet first.'); return; }
-      await initContractIfNeeded();
-      if (!contract) { alert('Please enter a contract address.'); return; }
 
       const recipient = document.getElementById('msgRecipient').value.trim();
-      const msgIdStr = document.getElementById('msgId').value.trim();
-      if (!recipient || !msgIdStr) { alert('Provide both recipient address and message ID.'); return; }
-
-      const msgId = BigInt(msgIdStr);
-      try {
-        const encInput = await relayerInstance.createEncryptedInput(contract.address, userAddress);
-        encInput.add64(msgId);
-        const encrypted = await encInput.encrypt();
-        const tx = await contract.sendMessage(recipient, encrypted.handles[0], encrypted.inputProof);
-        document.getElementById('status').textContent = 'Sending message...';
-        await tx.wait();
-        document.getElementById('status').textContent = 'Message sent!';
-        document.getElementById('msgId').value = '';
-        loadInbox();
-      } catch (err) {
-        console.error(err);
-        document.getElementById('status').textContent = 'Failed to send message.';
+      const msgIdStr  = document.getElementById('msgId').value.trim();
+      if (!recipient || !/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
+        alert('Recipient must be a valid 0x... address'); return;
       }
+      if (!msgIdStr) { alert('Provide a numeric Message ID'); return; }
+
+      await preflight(); // checks chain, funds, contract, etc.
+
+      // Encrypt the 64-bit message ID for this contract + user
+      const msgId = BigInt(msgIdStr);
+      const encInput = await relayerInstance.createEncryptedInput(contract.address, userAddress);
+      encInput.add64(msgId);
+      const encrypted = await encInput.encrypt();
+
+      console.log("encrypted payload:", encrypted);
+      if (!encrypted?.handles?.length) throw new Error("Relayer returned no handles. SDK not initialized or wrong params.");
+
+      document.getElementById('status').textContent = 'Sending message...';
+
+      // Provide a conservative gasLimit to avoid estimation edge cases
+      const tx = await contract.sendMessage(
+        recipient,
+        encrypted.handles[0],
+        encrypted.inputProof,
+        { gasLimit: 600000 }
+      );
+
+      await tx.wait();
+      document.getElementById('status').textContent = 'Message sent!';
+      document.getElementById('msgId').value = '';
+      loadInbox();
+    } catch (err) {
+      console.error(err);
+      const friendly = explainEthersError(err);
+      document.getElementById('status').textContent = 'Failed to send message: ' + friendly;
+      alert('Failed to send message:\n' + friendly);
     }
+  }
+</script>
 
     async function loadInbox() {
       if (!relayerInstance || !signer) return;
@@ -244,22 +264,39 @@
       }
     }
 
-    async function sendReply(msgIndex, replyId) {
-      if (!relayerInstance || !signer) return;
-      try {
-        const encInput = await relayerInstance.createEncryptedInput(contract.address, userAddress);
-        encInput.add64(replyId);
-        const encrypted = await encInput.encrypt();
-        const tx = await contract.sendReply(msgIndex, encrypted.handles[0], encrypted.inputProof);
-        document.getElementById('status').textContent = 'Sending reply...';
-        await tx.wait();
-        document.getElementById('status').textContent = 'Reply sent!';
-        loadInbox();
-      } catch (err) {
-        console.error(err);
-        document.getElementById('status').textContent = 'Failed to send reply.';
-      }
+    <script>
+  async function sendReply(msgIndex, replyId) {
+    try {
+      if (!relayerInstance || !signer) { alert('Please connect your wallet first.'); return; }
+      await preflight();
+
+      const encInput = await relayerInstance.createEncryptedInput(contract.address, userAddress);
+      encInput.add64(replyId);
+      const encrypted = await encInput.encrypt();
+
+      console.log("encrypted reply:", encrypted);
+      if (!encrypted?.handles?.length) throw new Error("Relayer returned no handles for reply.");
+
+      document.getElementById('status').textContent = 'Sending reply...';
+
+      const tx = await contract.sendReply(
+        msgIndex,
+        encrypted.handles[0],
+        encrypted.inputProof,
+        { gasLimit: 600000 }
+      );
+
+      await tx.wait();
+      document.getElementById('status').textContent = 'Reply sent!';
+      loadInbox();
+    } catch (err) {
+      console.error(err);
+      const friendly = explainEthersError(err);
+      document.getElementById('status').textContent = 'Failed to send reply: ' + friendly;
+      alert('Failed to send reply:\n' + friendly);
     }
+  }
+</script>
 
     // Populate fields from URL query parameters
     window.addEventListener('DOMContentLoaded', () => {
